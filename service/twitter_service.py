@@ -88,9 +88,19 @@ class TwitterService:
 
             # single video upload
             if media_type == "video" or sub_media_type == "carousel_album/video":
-                uploaded_media = twitter.chunked_upload(file=self.get_media_stream(media_urls[0]), filename="video.mp4",
-                                                        file_type="video/mp4")
-                uploaded_ids.append(uploaded_media.media_id)
+
+                try:
+                    uploaded_media = twitter.chunked_upload(file=self.get_media_stream(media_urls[0]),
+                                                            filename="video.mp4", file_type="video/mp4")
+                    uploaded_ids.append(uploaded_media.media_id)
+                except tweepy.TweepyException as e:
+                    # use fallback incase chuncked upload fails. Sometimes twitter rejects the default instagram media,
+                    # expected exception error: "Failed to finalize the chuncked upload"
+                    fallback_video_url = self.get_fallback_video_url(media_info['insta_permalink'])
+                    if fallback_video_url != "-1":
+                        uploaded_media = twitter.chunked_upload(file=self.get_media_stream(fallback_video_url),
+                                                                filename="video.mp4", file_type="video/mp4")
+                        uploaded_ids.append(uploaded_media.media_id)
                 # if media upload is successful add the media id to the tweet object status.setMediaIds(mediaIds);
 
             else:
@@ -132,3 +142,9 @@ class TwitterService:
             print(str(e))
 
         return buffered_stream
+
+    def get_fallback_video_url(self, url):
+        api = "https://api2.getvideobot.com/api/video?url=" + url
+        response = requests.get(url=api)
+        json = response.json()["video_url"]
+        return json
