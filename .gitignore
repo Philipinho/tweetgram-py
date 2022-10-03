@@ -1,0 +1,7 @@
+.idea
+venv
+myvenv
+__pycache__
+.env
+logs
+flower
