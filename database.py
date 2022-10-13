@@ -156,12 +156,12 @@ class DB:
                    .first() is not None
 
     @staticmethod
-    def save_posted_tweet(user_id, social_id, media_type, sub_media_type, twitter_user_id, twitter_username,
+    def save_posted_tweet(user_id, social_id, media_type, twitter_user_id, twitter_username,
                           tweet_id, insta_user_id, insta_username, insta_post_id,
                           insta_post_url, insta_thumbnail_url, insta_post_time, recorded_error):
         session.begin()
         tweet_record = TweetPosted(owner_id=user_id, social_id=social_id, media_type=media_type,
-                                   sub_media_type=sub_media_type, twitter_user_id=twitter_user_id,
+                                   twitter_user_id=twitter_user_id,
                                    twitter_username=twitter_username, tweet_id=tweet_id, insta_user_id=insta_user_id,
                                    insta_username=insta_username, insta_post_id=insta_post_id,
                                    insta_post_url=insta_post_url, insta_thumbnail_url=insta_thumbnail_url,

@@ -1,7 +1,10 @@
 import os
 
+import sentry_sdk
+from sentry_sdk.integrations.celery import CeleryIntegration
+
 from database import DB
-from service.twitter_service import TwitterService
+from logs.twitter_service1 import TwitterService
 from instagram_basic_display.InstagramBasicDisplay import InstagramBasicDisplay
 from decrypter import decrypter
 
@@ -10,9 +13,6 @@ from datetime import datetime
 from celery_init import make_celery
 
 celery = make_celery()
-
-import sentry_sdk
-from sentry_sdk.integrations.celery import CeleryIntegration
 
 sentry_sdk.init(
     dsn=os.environ['SENTRY_DSN'],
@@ -24,7 +24,7 @@ class InstagramService:
 
     def process_media(self):
         print("Running IG Service")
-        #twitter = TwitterService()
+        # twitter = TwitterService()
 
         db = DB()
 
@@ -70,16 +70,7 @@ class InstagramService:
                 "twitter_access_token_secret": account.tw_access_token_secret,
             }
 
-            insta_media_info = {
-                "username": "",
-                "caption": "",
-                "media_urls": [],
-                "media_type": "",
-                "insta_post_id": "",
-                "insta_permalink": "",
-                "insta_thumbnail_url": "",
-                "timestamp": "",
-            }
+            insta_media_info = {}
 
             instagram_media_list = []
 
@@ -108,7 +99,6 @@ class InstagramService:
                 insta_media_info['insta_thumbnail_url'] = media['permalink']
                 insta_media_info['insta_permalink'] = media['permalink']
                 insta_media_info['media_type'] = str(media['media_type']).lower()
-                insta_media_info['sub_media_type'] = str(media['media_type']).lower()
                 insta_media_info['timestamp'] = media['timestamp']
 
                 if str(media['media_type']).lower() == 'video':
@@ -116,52 +106,31 @@ class InstagramService:
                 else:
                     insta_media_info['insta_thumbnail_url'] = media['media_url']
 
-                media_urls = []
+                media_list = []
 
-                if str(media['media_type']).lower() == 'carousel_album':
-                    child_media_types = []
+                if str(media['media_type']).lower() == 'image' or str(media['media_type']).lower() == 'video':
+                    media_dict = {"media_id": media['id'], "media_url": media['media_url'],
+                                  "media_type": str(media['media_type']).lower()}
+                    media_list.append(media_dict)
+
+                elif str(media['media_type']).lower() == 'carousel_album':
+
                     for child_media in media['children']['data']:
-                        child_media_types.append(str(child_media['media_type']).lower())
+                        child_media_info = {"media_id": child_media['id'], "media_url": child_media['media_url'],
+                                            "media_type": str(child_media['media_type']).lower()}
+                        media_list.append(child_media_info)
 
-                    # You can not mix Twitter images with videos - Update: Twitter has changed this.
-                    # the below code will make the best decision
+                    media_list = media_list[0:4]  # fetch top 4 media files
 
-                    if 'video' in child_media_types:
-                        # if videos and images, are present in the carousel album,
-                        # if the video is the first media, upload the video alone
-                        # if not, select the other images upto 4
-
-                        if str(media['children']['data'][0]['media_type']).lower() == 'video':
-                            media_urls.append(media['children']['data'][0]['media_url'])
-                            insta_media_info['sub_media_type'] = "carousel_album/video"
-                        else:
-                            for child_media in media['children']['data']:
-                                if str(child_media['media_type']).lower() == 'image':
-                                    media_urls.append(child_media['media_url'])
-
-                            insta_media_info['sub_media_type'] = "carousel_album/images"
-                            media_urls = media_urls[0:4]  # fetch top 4 images
-                    else:
-                        # if no video in the carousel, upload first 4 images
-                        # Upload top 4 images to Twitter
-                        for child_media in media['children']['data']:
-                            media_urls.append(child_media['media_url'])
-
-                        insta_media_info['sub_media_type'] = "carousel_album/images"
-                        media_urls = media_urls[0:4]
-                        # get first four images inside the media_urls
-                        # send to twitter
-
-                else:
-                    # if we land here, it means that it is a single media, video or image
-                    media_urls.append(media['media_url'])
-
-                insta_media_info['media_urls'] = media_urls
+                insta_media_info['media_list'] = media_list
 
                 try:
+                    # twitter.send_tweet_with_media(social_account_info, insta_media_info)
                     send_tweet_task.delay(social_account_info, insta_media_info)
                 except Exception as e:
-                    # sentry_sdk.capture_exception(e)
+                    db.update_insta_last_id_and_time(post_id=media['id'], timestamp=media['timestamp'],
+                                                     social_id=account.social_id)
+                    sentry_sdk.capture_exception(e)
                     print("send tweet task exception: " + str(e))
 
 

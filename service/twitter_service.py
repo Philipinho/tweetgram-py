@@ -1,6 +1,5 @@
 import os
 import re
-import time
 
 import requests
 import tweepy
@@ -8,19 +7,18 @@ import io
 
 from decrypter import decrypter
 
+import sentry_sdk
+from sentry_sdk.integrations.celery import CeleryIntegration
+
 from database import DB
 from dotenv import load_dotenv
 
 load_dotenv()
 
-import sentry_sdk
-from sentry_sdk.integrations.celery import CeleryIntegration
-
-
-# sentry_sdk.init(
-#    dsn=os.environ['SENTRY_DSN'],
-#    integrations=[CeleryIntegration()], traces_sample_rate=1.0
-# )
+sentry_sdk.init(
+    dsn=os.environ['SENTRY_DSN'],
+    integrations=[CeleryIntegration()], traces_sample_rate=1.0
+)
 
 
 class TwitterService:
@@ -42,9 +40,8 @@ class TwitterService:
         insta_post_id = media_info['insta_post_id']
         caption = media_info['caption']
         media_type = media_info['media_type']
-        sub_media_type = media_info['sub_media_type']
         permalink = str(media_info['insta_permalink']).replace("www.instagram.com", "instagr.am")
-        media_urls = media_info['media_urls']
+        media_list = media_info['media_list']
         thumbnail_url = media_info['insta_thumbnail_url']
         insta_timestamp = media_info['timestamp']
 
@@ -99,51 +96,49 @@ class TwitterService:
             # next upload media to twitter and save
             uploaded_ids = []
 
-            # single video upload
-            if media_type == "video" or sub_media_type == "carousel_album/video":
-                try:
-                    uploaded_media = twitter.chunked_upload(file=self.get_media_stream(media_urls[0]),
-                                                            filename="video.mp4", file_type="video/mp4",
-                                                            media_category="tweet_video")
-                    uploaded_ids.append(uploaded_media.media_id)
-                except tweepy.TweepyException as e:
-                    # use fallback incase chuncked upload fails. Sometimes twitter rejects the default instagram media,
-                    # expected exception error: "Failed to finalize the chuncked upload"
-                    fallback_video_url = self.get_fallback_video_url(media_info['insta_permalink'])
-                    if fallback_video_url != "-1":
-                        uploaded_media = twitter.chunked_upload(file=self.get_media_stream(fallback_video_url),
-                                                                filename="video.mp4", file_type="video/mp4",
-                                                                media_category="tweet_video")
+            if media_type == "video":
+                uploaded_media_id = self.upload_twitter_video(twitter_api=twitter, media_id=media_list[0]['media_id'],
+                                                              media_url=media_list[0]['media_url'])
+                uploaded_ids.append(uploaded_media_id)
+
+            elif media_type == "image":
+                uploaded_image = twitter.simple_upload(file=self.get_media_stream(media_list[0]['media_url']),
+                                                       filename="image.jpg")
+                uploaded_ids.append(uploaded_image.media_id)
+
+            elif media_type == 'carousel_album':
+                for child_media in media_list:
+
+                    if child_media['media_type'] == 'image':
+                        uploaded_media = twitter.simple_upload(file=self.get_media_stream(child_media['media_url']),
+                                                               filename="image.jpg")
                         uploaded_ids.append(uploaded_media.media_id)
-                # if media upload is successful add the media id to the tweet object status.setMediaIds(mediaIds);
 
-            else:
-                # for pictures
-                # get array of pictures and loop through them
-                # add the uploaded media ids to a new array list
-
-                for image in media_urls:
-                    uploaded_image = twitter.simple_upload(file=self.get_media_stream(image), filename="image.jpg")
-
-                    if uploaded_image is not None:
-                        uploaded_ids.append(uploaded_image.media_id)
+                    if child_media['media_type'] == 'video':
+                        # send media id and url to ffmpeg api, re-encode and then get and stream new link
+                        uploaded_media_id = self.upload_twitter_video(twitter_api=twitter,
+                                                                      media_id=child_media['media_id'],
+                                                                      media_url=child_media['media_url'])
+                        uploaded_ids.append(uploaded_media_id)
 
             if uploaded_ids:
                 tweet = twitter.update_status(status=tweet_caption, media_ids=uploaded_ids)
 
                 db.save_posted_tweet(user_id=owner_id, social_id=social_id, media_type=media_type,
-                                     sub_media_type=sub_media_type, twitter_user_id=tweet.user.id,
-                                     twitter_username=tweet.user.screen_name, tweet_id=tweet.id_str,
+                                     twitter_user_id=tweet.user.id, twitter_username=tweet.user.screen_name,
+                                     tweet_id=tweet.id_str,
                                      insta_user_id=insta_user_id, insta_username=insta_username,
                                      insta_post_id=insta_post_id, insta_post_url=permalink,
                                      insta_thumbnail_url=thumbnail_url, insta_post_time=insta_timestamp,
                                      recorded_error="")
+
                 # at this point we are supposed to update the database after each send to Twitter
                 # Fields to update: latest_insta_id and timestamp
                 db.update_insta_last_id_and_time(post_id=insta_post_id, timestamp=insta_timestamp, social_id=social_id)
+            else:
+                db.update_insta_last_id_and_time(post_id=insta_post_id, timestamp=insta_timestamp, social_id=social_id)
 
-    @staticmethod
-    def get_media_stream(media_url: str):
+    def get_media_stream(self, media_url: str):
 
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " \
                      "Chrome/65.0.3325.181 Safari/537.36"
@@ -159,8 +154,28 @@ class TwitterService:
 
         return buffered_stream
 
-    def get_fallback_video_url(self, url):
-        api = "https://api2.getvideobot.com/api/video?url=" + url
-        response = requests.get(url=api)
+    def get_fallback_video_url(self, media_id, media_url):
+        api_url = "https://video.tweetgram.me/api.php"
+
+        data = {'media_id': media_id, 'media_url': media_url}
+        response = requests.get(url=api_url, params=data)
         json = response.json()["video_url"]
         return json
+
+    def upload_twitter_video(self, twitter_api, media_id, media_url):
+        uploaded_media_id = 0
+
+        uploaded_media = twitter_api.chunked_upload(file=self.get_media_stream(media_url),
+                                                    filename="video.mp4", file_type="video/mp4",
+                                                    media_category="tweet_video")
+
+        if uploaded_media.processing_info['state'] != 'failed':
+            uploaded_media_id = uploaded_media.media_id
+        else:
+            uploaded_media = twitter_api.chunked_upload(file=self.get_media_stream(
+                self.get_fallback_video_url(media_id=media_id, media_url=media_url)),
+                filename="video.mp4", file_type="video/mp4",
+                media_category="tweet_video")
+            uploaded_media_id = uploaded_media.media_id
+
+        return uploaded_media_id
