@@ -4,7 +4,7 @@ import sentry_sdk
 from sentry_sdk.integrations.celery import CeleryIntegration
 
 from database import DB
-from logs.twitter_service1 import TwitterService
+from twitter_service import TwitterService
 from instagram_basic_display.InstagramBasicDisplay import InstagramBasicDisplay
 from decrypter import decrypter
 
