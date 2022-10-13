@@ -1,20 +1,55 @@
+import os
+
 from database import DB
 from service.twitter_service import TwitterService
-from instagram_basic_display import InstagramBasicDisplay
+from instagram_basic_display.InstagramBasicDisplay import InstagramBasicDisplay
+from decrypter import decrypter
+
+from datetime import datetime
+
+from celery_init import make_celery
+
+celery = make_celery()
+
+import sentry_sdk
+from sentry_sdk.integrations.celery import CeleryIntegration
+
+sentry_sdk.init(
+    dsn=os.environ['SENTRY_DSN'],
+    integrations=[CeleryIntegration()], traces_sample_rate=1.0
+)
 
 
 class InstagramService:
 
     def process_media(self):
+        print("Running IG Service")
+        #twitter = TwitterService()
 
-        twitter = TwitterService()
         db = DB()
-        ig = InstagramBasicDisplay.InstagramBasicDisplay(app_id="", app_secret="", redirect_url="")
 
-        social_accounts = db.fetch_social_accounts()
+        ig = InstagramBasicDisplay(app_id="", app_secret="", redirect_url="")
+
+        social_accounts = db.fetch_active_social_accounts()
 
         for account in social_accounts:
-            ig.set_access_token(account.insta_access_token)
+            insta_media = None
+            try:
+                ig.set_access_token(decrypter.decrypt(account.insta_access_token))
+            except Exception as e:
+                print(e)
+                continue
+
+            try:
+                insta_media = ig.get_user_media(account.insta_user_id)
+            except Exception as e:
+                error_message = str(e) + " - timestamp: " + str(datetime.utcnow())
+                if 'error validating access token' in str(e).lower():
+                    db.update_social_account_status(status=0, social_id=account.social_id)
+                    db.update_last_insta_error(error_msg=error_message, social_id=account.social_id)
+                else:
+                    print(error_message)
+                    continue
 
             if db.is_premium(account.owner_id):
                 user_plan = "premium"
@@ -36,45 +71,59 @@ class InstagramService:
             }
 
             insta_media_info = {
+                "username": "",
                 "caption": "",
                 "media_urls": [],
                 "media_type": "",
                 "insta_post_id": "",
                 "insta_permalink": "",
+                "insta_thumbnail_url": "",
                 "timestamp": "",
-                "username": "",
             }
 
-            insta_media = ig.get_user_media(account.insta_user_id)
+            instagram_media_list = []
 
             for media in insta_media['data']:
-                if 'caption' in media:
-                    insta_media_info['caption'] = media['caption']
-
-                insta_media_info['insta_post_id'] = media['id']
-                insta_media_info['insta_permalink'] = media['permalink']
-                insta_media_info['media_type'] = media['media_type']
-                insta_media_info['sub_media_type'] = media['media_type']
-                insta_media_info['timestamp'] = media['timestamp']
-                insta_media_info['username'] = media['username']
-
-                media_urls = []
-
                 if media['id'] == account.insta_last_post_id:
                     print("end of discussion. No new post")
                     break
 
-                # LocalDateTime currentTimestamp = LocalDateTime.parse(data.getTimestamp().split("\\+")[0]);
-                # LocalDateTime previousTimestamp = LocalDateTime.parse(lastInstaTimestamp)
-                # if (currentTimestamp.isBefore(previousTimestamp) | | currentTimestamp.isEqual(previousTimestamp)){
-                # break; }
+                previous_time = datetime.strptime(str(account.insta_last_timestamp), "%Y-%m-%d %H:%M:%S")
+                current_time = datetime.strptime(str(media['timestamp']), "%Y-%m-%dT%H:%M:%S+%f")
 
-                if media['media_type'] == 'CAROUSEL_ALBUM':
+                if previous_time > current_time or current_time == previous_time:
+                    print("break, time difference.")
+                    break
+
+                instagram_media_list.append(media)
+
+            instagram_media_list.reverse()  # get the media in a descending order
+
+            for media in instagram_media_list:
+                if 'caption' in media:
+                    insta_media_info['caption'] = media['caption']
+
+                insta_media_info['username'] = media['username']
+                insta_media_info['insta_post_id'] = media['id']
+                insta_media_info['insta_thumbnail_url'] = media['permalink']
+                insta_media_info['insta_permalink'] = media['permalink']
+                insta_media_info['media_type'] = str(media['media_type']).lower()
+                insta_media_info['sub_media_type'] = str(media['media_type']).lower()
+                insta_media_info['timestamp'] = media['timestamp']
+
+                if str(media['media_type']).lower() == 'video':
+                    insta_media_info['insta_thumbnail_url'] = media['thumbnail_url']
+                else:
+                    insta_media_info['insta_thumbnail_url'] = media['media_url']
+
+                media_urls = []
+
+                if str(media['media_type']).lower() == 'carousel_album':
                     child_media_types = []
                     for child_media in media['children']['data']:
                         child_media_types.append(str(child_media['media_type']).lower())
 
-                    # You can not mix Twitter images with videos
+                    # You can not mix Twitter images with videos - Update: Twitter has changed this.
                     # the below code will make the best decision
 
                     if 'video' in child_media_types:
@@ -82,15 +131,15 @@ class InstagramService:
                         # if the video is the first media, upload the video alone
                         # if not, select the other images upto 4
 
-                        if media['children']['data'][0]['media_type'] == 'VIDEO':
+                        if str(media['children']['data'][0]['media_type']).lower() == 'video':
                             media_urls.append(media['children']['data'][0]['media_url'])
-                            insta_media_info['sub_media_type'] = "CAROUSEL_ALBUM/VIDEO"
+                            insta_media_info['sub_media_type'] = "carousel_album/video"
                         else:
                             for child_media in media['children']['data']:
-                                if child_media['media_type'] == 'IMAGE':
+                                if str(child_media['media_type']).lower() == 'image':
                                     media_urls.append(child_media['media_url'])
 
-                            insta_media_info['sub_media_type'] = "CAROUSEL_ALBUM/IMAGES"
+                            insta_media_info['sub_media_type'] = "carousel_album/images"
                             media_urls = media_urls[0:4]  # fetch top 4 images
                     else:
                         # if no video in the carousel, upload first 4 images
@@ -98,7 +147,7 @@ class InstagramService:
                         for child_media in media['children']['data']:
                             media_urls.append(child_media['media_url'])
 
-                        insta_media_info['sub_media_type'] = "CAROUSEL_ALBUM/IMAGES"
+                        insta_media_info['sub_media_type'] = "carousel_album/images"
                         media_urls = media_urls[0:4]
                         # get first four images inside the media_urls
                         # send to twitter
@@ -109,18 +158,14 @@ class InstagramService:
 
                 insta_media_info['media_urls'] = media_urls
 
-                twitter.send_tweet_with_media(social_account_info, insta_media_info)
-
-                # send to twitter
-                # at this point we are supposed to update the database after each send to Twitter
-                # Fields to update: latest_insta_id and timestamp
-
-        # next could be a try catch block to parse and handle errors
-
-    def send_tweet_task(self, social_account: dict, media_info: dict):
-        twitter = TwitterService()
-        twitter.send_tweet_with_media(social_account, media_info)
+                try:
+                    send_tweet_task.delay(social_account_info, insta_media_info)
+                except Exception as e:
+                    # sentry_sdk.capture_exception(e)
+                    print("send tweet task exception: " + str(e))
 
 
-#insta = InstagramService()
-#insta.process_media()
+@celery.task()
+def send_tweet_task(social_account: dict, media_info: dict):
+    twitter = TwitterService()
+    twitter.send_tweet_with_media(social_account, media_info)

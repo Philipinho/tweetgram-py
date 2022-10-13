@@ -1,13 +1,26 @@
 import os
 import re
+import time
+
 import requests
 import tweepy
 import io
+
+from decrypter import decrypter
 
 from database import DB
 from dotenv import load_dotenv
 
 load_dotenv()
+
+import sentry_sdk
+from sentry_sdk.integrations.celery import CeleryIntegration
+
+
+# sentry_sdk.init(
+#    dsn=os.environ['SENTRY_DSN'],
+#    integrations=[CeleryIntegration()], traces_sample_rate=1.0
+# )
 
 
 class TwitterService:
@@ -25,30 +38,30 @@ class TwitterService:
         user_plan = social_account['user_plan']
 
         # media info
+        insta_username = media_info['username']
         insta_post_id = media_info['insta_post_id']
         caption = media_info['caption']
-        media_type = str(media_info['media_type']).lower()
-        sub_media_type = str(media_info['sub_media_type']).lower()
+        media_type = media_info['media_type']
+        sub_media_type = media_info['sub_media_type']
         permalink = str(media_info['insta_permalink']).replace("www.instagram.com", "instagr.am")
         media_urls = media_info['media_urls']
-        insta_username = media_info['username']
+        thumbnail_url = media_info['insta_thumbnail_url']
         insta_timestamp = media_info['timestamp']
 
         db = DB()
 
         if db.tweeted_before(insta_post_id):
+            print("returned here.")
             return
 
         tweepy_auth = tweepy.OAuth1UserHandler(
             "{}".format(os.environ['TWITTER_CONSUMER_KEY']), "{}".format(os.environ['TWITTER_CONSUMER_SECRET']),
-            "{}".format(social_account['twitter_access_token']),
-            "{}".format(social_account['twitter_access_token_secret']))
+            "{}".format(decrypter.decrypt(social_account['twitter_access_token'])),
+            "{}".format(decrypter.decrypt(social_account['twitter_access_token_secret'])))
 
         twitter = tweepy.API(tweepy_auth)
 
-        # print(twitter.verify_credentials)
-
-        if auto_post == 1 or (auto_post == 0 and "#tweetgram" in caption):
+        if auto_post == 1 or (auto_post == 0 and "#tweetgram".lower() in str(caption).lower()):
 
             if auto_post == 0:
                 caption = str(caption).replace("#tweetgram", '')
@@ -57,9 +70,9 @@ class TwitterService:
 
             tweet_caption = ""
 
-            if caption and len(caption) > 180:
-                tweet_caption = caption[:180] + "..."
-            elif caption and len(caption) < 180:
+            if caption and len(caption) > 210:
+                tweet_caption = caption[:210] + "..."
+            elif caption and len(caption) < 210:
                 tweet_caption = caption
             else:
                 tweet_caption = ""
@@ -88,10 +101,10 @@ class TwitterService:
 
             # single video upload
             if media_type == "video" or sub_media_type == "carousel_album/video":
-
                 try:
                     uploaded_media = twitter.chunked_upload(file=self.get_media_stream(media_urls[0]),
-                                                            filename="video.mp4", file_type="video/mp4")
+                                                            filename="video.mp4", file_type="video/mp4",
+                                                            media_category="tweet_video")
                     uploaded_ids.append(uploaded_media.media_id)
                 except tweepy.TweepyException as e:
                     # use fallback incase chuncked upload fails. Sometimes twitter rejects the default instagram media,
@@ -99,7 +112,8 @@ class TwitterService:
                     fallback_video_url = self.get_fallback_video_url(media_info['insta_permalink'])
                     if fallback_video_url != "-1":
                         uploaded_media = twitter.chunked_upload(file=self.get_media_stream(fallback_video_url),
-                                                                filename="video.mp4", file_type="video/mp4")
+                                                                filename="video.mp4", file_type="video/mp4",
+                                                                media_category="tweet_video")
                         uploaded_ids.append(uploaded_media.media_id)
                 # if media upload is successful add the media id to the tweet object status.setMediaIds(mediaIds);
 
@@ -118,17 +132,19 @@ class TwitterService:
                 tweet = twitter.update_status(status=tweet_caption, media_ids=uploaded_ids)
 
                 db.save_posted_tweet(user_id=owner_id, social_id=social_id, media_type=media_type,
-                                     sub_media_type=sub_media_type,
-                                     twitter_user_id=tweet.user.id, twitter_username=tweet.user.screen_name,
-                                     tweet_id=tweet.id_str,
+                                     sub_media_type=sub_media_type, twitter_user_id=tweet.user.id,
+                                     twitter_username=tweet.user.screen_name, tweet_id=tweet.id_str,
                                      insta_user_id=insta_user_id, insta_username=insta_username,
                                      insta_post_id=insta_post_id, insta_post_url=permalink,
-                                     insta_post_time=insta_timestamp, recorded_error="None")
+                                     insta_thumbnail_url=thumbnail_url, insta_post_time=insta_timestamp,
+                                     recorded_error="")
                 # at this point we are supposed to update the database after each send to Twitter
                 # Fields to update: latest_insta_id and timestamp
                 db.update_insta_last_id_and_time(post_id=insta_post_id, timestamp=insta_timestamp, social_id=social_id)
 
-    def get_media_stream(self, media_url: str):
+    @staticmethod
+    def get_media_stream(media_url: str):
+
         user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) " \
                      "Chrome/65.0.3325.181 Safari/537.36"
 
