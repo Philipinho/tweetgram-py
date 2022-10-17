@@ -18,7 +18,6 @@ CELERYBEAT_SCHEDULE = {
         'schedule': crontab(minute=0, hour=16),
     }
 }
-CELERY_TIMEZONE = 'UTC'
 
 
 def make_celery(app=None):
@@ -30,7 +29,7 @@ def make_celery(app=None):
     celery = Celery(name, broker=os.environ['CELERY_BROKER_URL'],
                     backend=os.environ['CELERY_BROKER_URL'])
 
-    celery.conf.update(timezone='Africa/Lagos')
+    celery.conf.update(timezone=os.environ['CELERY_TIMEZONE'])
 
     #celery.conf.update(beat_schedule=CELERYBEAT_SCHEDULE)
 
