@@ -14,10 +14,11 @@ from celery_init import make_celery
 
 celery = make_celery()
 
-sentry_sdk.init(
-    dsn=os.environ['SENTRY_DSN'],
-    integrations=[CeleryIntegration()], traces_sample_rate=1.0
-)
+
+# sentry_sdk.init(
+#    dsn=os.environ['SENTRY_DSN'],
+#    integrations=[CeleryIntegration()], traces_sample_rate=1.0
+# )
 
 
 class InstagramService:
@@ -31,25 +32,24 @@ class InstagramService:
         ig = InstagramBasicDisplay(app_id="", app_secret="", redirect_url="")
 
         social_accounts = db.fetch_active_social_accounts()
+        print(social_accounts)
 
         for account in social_accounts:
             insta_media = None
-            try:
-                ig.set_access_token(decrypter.decrypt(account.insta_access_token))
-            except Exception as e:
-                print(e)
-                continue
 
             try:
+                ig.set_access_token(decrypter.decrypt(account.insta_access_token))
                 insta_media = ig.get_user_media(account.insta_user_id)
+                print(ig.get_user_media())
+                print(ig.get_user_profile())
             except Exception as e:
                 error_message = str(e) + " - timestamp: " + str(datetime.utcnow())
+                print(error_message)
                 if 'error validating access token' in str(e).lower():
                     db.update_social_account_status(status=0, social_id=account.social_id)
                     db.update_last_insta_error(error_msg=error_message, social_id=account.social_id)
-                else:
-                    print(error_message)
-                    continue
+
+                continue
 
             if db.is_premium(account.owner_id):
                 user_plan = "premium"
@@ -125,13 +125,18 @@ class InstagramService:
                 insta_media_info['media_list'] = media_list
 
                 try:
+                    print("We are here")
                     # twitter.send_tweet_with_media(social_account_info, insta_media_info)
-                    send_tweet_task.delay(social_account_info, insta_media_info)
+                # send_tweet_task.delay(social_account_info, insta_media_info)
                 except Exception as e:
                     db.update_insta_last_id_and_time(post_id=media['id'], timestamp=media['timestamp'],
                                                      social_id=account.social_id)
                     sentry_sdk.capture_exception(e)
                     print("send tweet task exception: " + str(e))
+
+
+insta = InstagramService()
+insta.process_media()
 
 
 @celery.task()
